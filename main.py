@@ -7,13 +7,23 @@ import tkinter as tk
 # 游戏画布尺寸，以及 Tkinter 定时调用主循环的间隔（约 60 FPS）。
 WIDTH, HEIGHT = 480, 760
 FPS_MS = 16
+
+# 经验、分数和道具平衡参数。
 XP_THRESHOLDS = [100, 250, 450, 700]
 XP_REWARDS = {"scout": 6, "tank": 15, "zigzag": 10}
 SCORE_REWARDS = {"scout": 100, "tank": 250, "zigzag": 170}
-DROP_TYPES = ("barrier", "rocket", "energy")
+DROP_TYPES = ("mask", "rocket", "energy")
 NORMAL_DROP_CHANCE = 0.06
 ROCKET_INTERVAL = 0.8
 MAX_POWER_BONUS_XP = 250
+
+# 敌人节奏参数：普通敌机更密集，但攻击等待时间更长。
+SPAWN_BASE_INTERVAL = 0.70
+SPAWN_WAVE_ACCELERATION = 0.025
+MIN_SPAWN_INTERVAL = 0.22
+ENEMY_INITIAL_SHOT_DELAY = (2.0, 4.0)
+ENEMY_SHOT_DELAY = (1.8, 3.6)
+BOSS_SHOT_INTERVAL = 0.95
 
 
 class ThunderFighter:
@@ -68,7 +78,7 @@ class ThunderFighter:
             "x": WIDTH / 2, "y": HEIGHT - 90, "speed": 310,
             "shield": 5, "max_shield": 5, "cooldown": 0,
             "power": 1, "experience": 0, "bonus_experience": 0,
-            "barrier_timer": 0, "rocket_timer": 0, "rocket_cooldown": 0,
+            "mask_timer": 0, "rocket_timer": 0, "rocket_cooldown": 0,
             "invincible": 0,
         }
         self.bullets = []
@@ -130,11 +140,11 @@ class ThunderFighter:
 
     def update(self, dt):
         p = self.player
-        # 更新射击冷却、临时火力和受伤后的无敌时间。
+        # 更新射击冷却、临时道具能力和受伤后的无敌时间。
         if p["cooldown"] > 0:
             p["cooldown"] -= dt
-        if p["barrier_timer"] > 0:
-            p["barrier_timer"] = max(0, p["barrier_timer"] - dt)
+        if p["mask_timer"] > 0:
+            p["mask_timer"] = max(0, p["mask_timer"] - dt)
         if p["rocket_timer"] > 0:
             p["rocket_timer"] = max(0, p["rocket_timer"] - dt)
         if p["rocket_cooldown"] > 0:
@@ -170,7 +180,11 @@ class ThunderFighter:
             self.spawn_timer -= dt
             if self.spawn_timer <= 0:
                 self.spawn_enemy()
-                self.spawn_timer = max(0.28, 0.85 - self.wave * 0.035)
+                # 敌人生成间隔随波次缩短，但保留最低间隔避免无限堆叠。
+                self.spawn_timer = max(
+                    MIN_SPAWN_INTERVAL,
+                    SPAWN_BASE_INTERVAL - self.wave * SPAWN_WAVE_ACCELERATION,
+                )
         else:
             self.update_boss(dt)
 
@@ -200,7 +214,7 @@ class ThunderFighter:
             enemy["shoot"] -= dt
             if enemy["shoot"] <= 0 and enemy["y"] > 40:
                 self.enemy_shoot(enemy)
-                enemy["shoot"] = random.uniform(1.1, 2.5)
+                enemy["shoot"] = random.uniform(*ENEMY_SHOT_DELAY)
             if enemy["y"] > HEIGHT + 45:
                 self.enemies.remove(enemy)
 
@@ -245,7 +259,7 @@ class ThunderFighter:
             "kind": kind, "size": size, "hp": hp,
             "max_hp": hp, "speed": random.uniform(75, 125) + self.wave * 2,
             "phase": random.random() * 6.28, "wobble": random.uniform(20, 75),
-            "shoot": random.uniform(1.4, 3.5),
+            "shoot": random.uniform(*ENEMY_INITIAL_SHOT_DELAY),
         })
 
     def spawn_boss(self):
@@ -268,7 +282,7 @@ class ThunderFighter:
             b["x"] = WIDTH / 2 + math.sin(b["phase"] * 0.75) * 145
             self.boss_shot_timer -= dt
             if self.boss_shot_timer <= 0:
-                self.boss_shot_timer = 0.75
+                self.boss_shot_timer = BOSS_SHOT_INTERVAL
                 for angle in (-0.45, -0.22, 0, 0.22, 0.45):
                     self.enemy_bullets.append({"x": b["x"], "y": b["y"] + 35,
                                                "vx": math.sin(angle) * 140,
@@ -350,7 +364,7 @@ class ThunderFighter:
                 if self.boss["hp"] <= 0:
                     self.defeat_boss()
 
-        # 无敌期间跳过玩家受伤判定，但仍允许收集能量核心。
+        # 无敌期间跳过玩家受伤判定，但仍允许收集道具。
         if p["invincible"] <= 0:
             player_hit_this_frame = False
             for enemy in self.enemies[:]:
@@ -366,18 +380,18 @@ class ThunderFighter:
                         self.hit_player()
                         player_hit_this_frame = True
 
-        # 能量核心最多将火力提升到三重射击，并持续一段时间。
+        # 道具拾取统一走 apply_powerup，避免普通掉落和满级奖励行为不一致。
         for power in self.powerups[:]:
             if abs(p["x"] - power["x"]) < 24 and abs(p["y"] - power["y"]) < 25:
                 self.apply_powerup(power["type"])
                 self.score += 50
                 self.powerups.remove(power)
-                colors = {"barrier": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
+                colors = {"mask": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
                 self.add_particles(power["x"], power["y"], colors[power["type"]], 15, 0.6)
 
     def apply_powerup(self, power_type):
-        if power_type == "barrier":
-            self.player["barrier_timer"] = 10
+        if power_type == "mask":
+            self.player["mask_timer"] = 10
         elif power_type == "rocket":
             self.player["rocket_timer"] = 10
             self.player["rocket_cooldown"] = 0
@@ -429,7 +443,7 @@ class ThunderFighter:
     def grant_bonus_powerup(self):
         power_type = random.choice(DROP_TYPES)
         self.apply_powerup(power_type)
-        colors = {"barrier": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
+        colors = {"mask": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
         self.add_particles(self.player["x"], self.player["y"], colors[power_type], 20, 0.75)
 
     def add_explosion(self, x, y, radius):
@@ -443,9 +457,9 @@ class ThunderFighter:
                 self.explosions.remove(explosion)
 
     def hit_player(self):
-        # 防护罩可抵挡一次伤害；否则消耗护盾，并在护盾耗尽后结束游戏。
-        if self.player["barrier_timer"] > 0:
-            self.player["barrier_timer"] = 0
+        # MASK 可抵挡一次伤害；否则消耗 SHIELD，并在护盾耗尽后结束游戏。
+        if self.player["mask_timer"] > 0:
+            self.player["mask_timer"] = 0
             self.add_particles(self.player["x"], self.player["y"], "#73eaff", 18, 0.55)
             return
         self.player["shield"] -= 1
@@ -511,7 +525,7 @@ class ThunderFighter:
             self.draw_boss(offset_x, offset_y)
         # draw_player 接收的是战机的绝对坐标，屏幕震动偏移需要叠加到玩家当前位置。
         self.draw_player(self.player["x"] + offset_x, self.player["y"] + offset_y)
-        self.draw_barrier_aura(offset_x, offset_y)
+        self.draw_mask_aura(offset_x, offset_y)
         self.draw_explosions(offset_x, offset_y)
         self.draw_particles(offset_x, offset_y)
 
@@ -582,8 +596,8 @@ class ThunderFighter:
         self.canvas.create_rectangle(92, 50, 240, 55, fill="#172c4d", outline="")
         self.canvas.create_rectangle(92, 50, 92 + 148 * xp_ratio, 55, fill="#61d8ff", outline="")
         status = []
-        if self.player["barrier_timer"] > 0:
-            status.append(f"BARRIER {math.ceil(self.player['barrier_timer'])}s")
+        if self.player["mask_timer"] > 0:
+            status.append(f"MASK {math.ceil(self.player['mask_timer'])}s")
         if self.player["rocket_timer"] > 0:
             status.append(f"ROCKET {math.ceil(self.player['rocket_timer'])}s")
         if status:
@@ -605,8 +619,9 @@ class ThunderFighter:
         self.canvas.create_polygon([x - 15, y + 19, x - 8, y + 12, x - 6, y + 28, x - 13, y + 24], fill="#ffb44d", outline="")
         self.canvas.create_polygon([x + 15, y + 19, x + 8, y + 12, x + 6, y + 28, x + 13, y + 24], fill="#ffb44d", outline="")
 
-    def draw_barrier_aura(self, ox, oy):
-        timer = self.player["barrier_timer"]
+    def draw_mask_aura(self, ox, oy):
+        """只绘制 MASK 光环；最后三秒闪烁时不隐藏战机本体。"""
+        timer = self.player["mask_timer"]
         if timer <= 0:
             return
         if timer <= 3 and int(timer * 10) % 2 == 0:
@@ -641,7 +656,7 @@ class ThunderFighter:
     def draw_powerup(self, power, ox, oy):
         x, y = power["x"] + ox, power["y"] + oy
         r = 13 + math.sin(power["spin"]) * 2
-        if power["type"] == "barrier":
+        if power["type"] == "mask":
             self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="#145777", outline="#73eaff", width=2)
             self.canvas.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#d7fbff", width=2)
             label, color = "M", "#eaffff"
