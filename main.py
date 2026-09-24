@@ -6,6 +6,13 @@ import tkinter as tk
 
 WIDTH, HEIGHT = 480, 760
 FPS_MS = 16
+XP_THRESHOLDS = [100, 250, 450, 700]
+XP_REWARDS = {"scout": 6, "tank": 15, "zigzag": 10}
+SCORE_REWARDS = {"scout": 100, "tank": 250, "zigzag": 170}
+DROP_TYPES = ("mask", "rocket", "energy")
+NORMAL_DROP_CHANCE = 0.06
+ROCKET_INTERVAL = 0.8
+MAX_POWER_BONUS_XP = 250
 
 
 class ThunderFighter:
@@ -53,13 +60,17 @@ class ThunderFighter:
     def reset_game(self):
         self.player = {
             "x": WIDTH / 2, "y": HEIGHT - 90, "speed": 310,
-            "lives": 3, "cooldown": 0, "power": 1,
-            "power_timer": 0, "invincible": 0,
+            "shield": 5, "max_shield": 5, "cooldown": 0,
+            "power": 1, "experience": 0, "bonus_experience": 0,
+            "mask_timer": 0, "rocket_timer": 0, "rocket_cooldown": 0,
+            "invincible": 0,
         }
         self.bullets = []
+        self.rockets = []
         self.enemy_bullets = []
         self.enemies = []
         self.particles = []
+        self.explosions = []
         self.powerups = []
         self.score = 0
         self.wave = 1
@@ -111,10 +122,12 @@ class ThunderFighter:
         p = self.player
         if p["cooldown"] > 0:
             p["cooldown"] -= dt
-        if p["power_timer"] > 0:
-            p["power_timer"] -= dt
-            if p["power_timer"] <= 0:
-                p["power"] = 1
+        if p["mask_timer"] > 0:
+            p["mask_timer"] = max(0, p["mask_timer"] - dt)
+        if p["rocket_timer"] > 0:
+            p["rocket_timer"] = max(0, p["rocket_timer"] - dt)
+        if p["rocket_cooldown"] > 0:
+            p["rocket_cooldown"] -= dt
         if p["invincible"] > 0:
             p["invincible"] -= dt
 
@@ -128,7 +141,7 @@ class ThunderFighter:
 
         if ("space" in self.keys or "j" in self.keys) and p["cooldown"] <= 0:
             self.shoot()
-            p["cooldown"] = 0.16 if p["power"] < 3 else 0.11
+            p["cooldown"] = 0.16 if p["power"] <= 3 else 0.11
 
         self.wave_timer += dt
         if self.wave_timer > 25 and self.boss is None:
@@ -152,6 +165,12 @@ class ThunderFighter:
             bullet["life"] -= dt
             if bullet["y"] < -20 or bullet["life"] <= 0:
                 self.bullets.remove(bullet)
+
+        for rocket in self.rockets[:]:
+            rocket["y"] -= rocket["speed"] * dt
+            rocket["life"] -= dt
+            if rocket["y"] < -30 or rocket["life"] <= 0:
+                self.rockets.remove(rocket)
 
         for bullet in self.enemy_bullets[:]:
             bullet["x"] += bullet["vx"] * dt
@@ -178,13 +197,26 @@ class ThunderFighter:
 
         self.check_collisions()
         self.update_particles(dt)
+        self.update_explosions(dt)
 
     def shoot(self):
         p = self.player
-        offsets = [0] if p["power"] == 1 else [-11, 11] if p["power"] == 2 else [-18, 0, 18]
+        offsets_by_power = {
+            1: [0],
+            2: [-11, 11],
+            3: [-18, 0, 18],
+            4: [-24, -8, 8, 24],
+            5: [-28, -14, 0, 14, 28],
+        }
+        offsets = offsets_by_power[p["power"]]
         for offset in offsets:
             self.bullets.append({"x": p["x"] + offset, "y": p["y"] - 25,
                                  "speed": 620, "damage": 1, "life": 1.5})
+        if p["rocket_timer"] > 0 and p["rocket_cooldown"] <= 0:
+            self.rockets.append({"x": p["x"], "y": p["y"] - 30,
+                                 "speed": 430, "damage": 12,
+                                 "radius": 55, "life": 2.4})
+            p["rocket_cooldown"] = ROCKET_INTERVAL
         self.add_particles(p["x"], p["y"] - 27, "#8ff8ff", 2, 0.2)
 
     def spawn_enemy(self):
@@ -239,14 +271,7 @@ class ThunderFighter:
                 target_hit = True
                 self.add_particles(bullet["x"], bullet["y"], "#ffca6b", 3, 0.35)
                 if self.boss["hp"] <= 0:
-                    self.score += 5000
-                    self.add_particles(self.boss["x"], self.boss["y"], "#ff698a", 45, 1.2)
-                    self.powerups.append({"x": self.boss["x"], "y": self.boss["y"], "type": "power", "spin": 0})
-                    self.boss = None
-                    self.wave += 1
-                    self.wave_timer = 0
-                    self.wave_banner = 3
-                    self.shake = 1
+                    self.defeat_boss()
             if target_hit and bullet in self.bullets:
                 self.bullets.remove(bullet)
                 continue
@@ -257,40 +282,154 @@ class ThunderFighter:
                         self.bullets.remove(bullet)
                     self.add_particles(bullet["x"], bullet["y"], "#ffb35c", 3, 0.25)
                     if enemy["hp"] <= 0:
-                        self.score += {"scout": 100, "tank": 250, "zigzag": 170}[enemy["kind"]]
-                        self.add_particles(enemy["x"], enemy["y"], "#ff5c79", 12, 0.6)
-                        if random.random() < 0.12:
-                            self.powerups.append({"x": enemy["x"], "y": enemy["y"], "type": "power", "spin": 0})
-                        self.enemies.remove(enemy)
+                        self.defeat_enemy(enemy)
                     break
 
+        for rocket in self.rockets[:]:
+            direct_enemy = None
+            direct_boss = None
+            if self.boss and abs(rocket["x"] - self.boss["x"]) < 69 and abs(rocket["y"] - self.boss["y"]) < 56:
+                direct_boss = self.boss
+            else:
+                for enemy in self.enemies[:]:
+                    if abs(rocket["x"] - enemy["x"]) < enemy["size"] + 7 and abs(rocket["y"] - enemy["y"]) < enemy["size"] + 10:
+                        direct_enemy = enemy
+                        break
+
+            if not direct_enemy and not direct_boss:
+                continue
+
+            impact_x, impact_y = rocket["x"], rocket["y"]
+            radius = rocket["radius"]
+            self.rockets.remove(rocket)
+            self.add_explosion(impact_x, impact_y, radius)
+            self.shake = max(self.shake, 0.35)
+
+            if direct_enemy:
+                direct_enemy["hp"] -= rocket["damage"]
+                if direct_enemy["hp"] <= 0 and direct_enemy in self.enemies:
+                    self.defeat_enemy(direct_enemy)
+            elif direct_boss:
+                direct_boss["hp"] -= rocket["damage"]
+                if direct_boss["hp"] <= 0 and self.boss is direct_boss:
+                    self.defeat_boss()
+
+            for enemy in self.enemies[:]:
+                if enemy is direct_enemy:
+                    continue
+                if math.hypot(enemy["x"] - impact_x, enemy["y"] - impact_y) <= radius:
+                    enemy["hp"] -= 6
+                    self.add_particles(enemy["x"], enemy["y"], "#ffcf6b", 5, 0.3)
+                    if enemy["hp"] <= 0:
+                        self.defeat_enemy(enemy)
+
+            if self.boss and self.boss is not direct_boss and math.hypot(self.boss["x"] - impact_x, self.boss["y"] - impact_y) <= radius:
+                self.boss["hp"] -= 6
+                self.add_particles(self.boss["x"], self.boss["y"], "#ffcf6b", 5, 0.3)
+                if self.boss["hp"] <= 0:
+                    self.defeat_boss()
+
         if p["invincible"] <= 0:
+            player_hit_this_frame = False
             for enemy in self.enemies[:]:
                 if abs(p["x"] - enemy["x"]) < enemy["size"] + 12 and abs(p["y"] - enemy["y"]) < enemy["size"] + 14:
                     self.enemies.remove(enemy)
-                    self.hit_player()
-                    break
+                    if not player_hit_this_frame:
+                        self.hit_player()
+                        player_hit_this_frame = True
             for bullet in self.enemy_bullets[:]:
                 if abs(p["x"] - bullet["x"]) < 13 and abs(p["y"] - bullet["y"]) < 16:
                     self.enemy_bullets.remove(bullet)
-                    self.hit_player()
-                    break
+                    if not player_hit_this_frame:
+                        self.hit_player()
+                        player_hit_this_frame = True
 
         for power in self.powerups[:]:
             if abs(p["x"] - power["x"]) < 24 and abs(p["y"] - power["y"]) < 25:
-                p["power"] = min(3, p["power"] + 1)
-                p["power_timer"] = 14
+                self.apply_powerup(power["type"])
                 self.score += 50
                 self.powerups.remove(power)
-                self.add_particles(power["x"], power["y"], "#58f4bd", 15, 0.6)
+                colors = {"mask": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
+                self.add_particles(power["x"], power["y"], colors[power["type"]], 15, 0.6)
+
+    def apply_powerup(self, power_type):
+        if power_type == "mask":
+            self.player["mask_timer"] = 10
+        elif power_type == "rocket":
+            self.player["rocket_timer"] = 10
+            self.player["rocket_cooldown"] = 0
+        elif power_type == "energy":
+            self.player["shield"] = min(self.player["max_shield"], self.player["shield"] + 1)
+
+    def defeat_enemy(self, enemy):
+        self.score += SCORE_REWARDS[enemy["kind"]]
+        self.gain_experience(XP_REWARDS[enemy["kind"]])
+        self.add_particles(enemy["x"], enemy["y"], "#ff5c79", 12, 0.6)
+        self.spawn_powerup(enemy["x"], enemy["y"])
+        if enemy in self.enemies:
+            self.enemies.remove(enemy)
+
+    def defeat_boss(self):
+        if not self.boss:
+            return
+        boss = self.boss
+        self.score += 5000
+        self.gain_experience(100)
+        self.add_particles(boss["x"], boss["y"], "#ff698a", 45, 1.2)
+        self.add_explosion(boss["x"], boss["y"], 75)
+        self.spawn_powerup(boss["x"], boss["y"], guaranteed=True)
+        self.boss = None
+        self.wave += 1
+        self.wave_timer = 0
+        self.wave_banner = 3
+        self.shake = 1
+
+    def spawn_powerup(self, x, y, guaranteed=False):
+        if guaranteed or random.random() < NORMAL_DROP_CHANCE:
+            self.powerups.append({"x": x, "y": y,
+                                  "type": random.choice(DROP_TYPES), "spin": 0})
+
+    def gain_experience(self, amount):
+        p = self.player
+        if p["power"] < 5:
+            p["experience"] += amount
+            if p["experience"] >= XP_THRESHOLDS[p["power"] - 1]:
+                p["power"] += 1
+                p["experience"] = 0
+        else:
+            p["bonus_experience"] += amount
+
+        while p["power"] >= 5 and p["bonus_experience"] >= MAX_POWER_BONUS_XP:
+            p["bonus_experience"] -= MAX_POWER_BONUS_XP
+            self.grant_bonus_powerup()
+
+    def grant_bonus_powerup(self):
+        power_type = random.choice(DROP_TYPES)
+        self.apply_powerup(power_type)
+        colors = {"mask": "#73eaff", "rocket": "#ff9c58", "energy": "#58f4bd"}
+        self.add_particles(self.player["x"], self.player["y"], colors[power_type], 20, 0.75)
+
+    def add_explosion(self, x, y, radius):
+        self.explosions.append({"x": x, "y": y, "radius": radius,
+                                "life": 0.28, "max_life": 0.28})
+
+    def update_explosions(self, dt):
+        for explosion in self.explosions[:]:
+            explosion["life"] -= dt
+            if explosion["life"] <= 0:
+                self.explosions.remove(explosion)
 
     def hit_player(self):
-        self.player["lives"] -= 1
+        if self.player["mask_timer"] > 0:
+            self.player["mask_timer"] = 0
+            self.add_particles(self.player["x"], self.player["y"], "#73eaff", 18, 0.55)
+            return
+        self.player["shield"] -= 1
         self.player["invincible"] = 2
         self.shake = 0.8
         self.flash = 0.75
         self.add_particles(self.player["x"], self.player["y"], "#7bdcff", 25, 0.8)
-        if self.player["lives"] <= 0:
+        if self.player["shield"] <= 0:
             self.best_score = max(self.best_score, self.score)
             self.state = "gameover"
 
@@ -330,6 +469,11 @@ class ThunderFighter:
             x, y = bullet["x"] + offset_x, bullet["y"] + offset_y
             self.canvas.create_line(x, y + 8, x, y - 9, fill="#a7fbff", width=3)
             self.canvas.create_line(x, y + 2, x, y - 8, fill="#ffffff", width=1)
+        for rocket in self.rockets:
+            x, y = rocket["x"] + offset_x, rocket["y"] + offset_y
+            self.canvas.create_polygon([x, y - 18, x - 9, y + 11, x, y + 6, x + 9, y + 11],
+                                       fill="#ff704d", outline="#ffd28a")
+            self.canvas.create_line(x, y + 11, x, y + 23, fill="#fff0a6", width=4)
         for bullet in self.enemy_bullets:
             x, y = bullet["x"] + offset_x, bullet["y"] + offset_y
             self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#ff587e", outline="#ffc0cb")
@@ -339,6 +483,8 @@ class ThunderFighter:
             self.draw_boss(offset_x, offset_y)
         # draw_player 接收的是战机的绝对坐标，屏幕震动偏移需要叠加到玩家当前位置。
         self.draw_player(self.player["x"] + offset_x, self.player["y"] + offset_y)
+        self.draw_mask_aura(offset_x, offset_y)
+        self.draw_explosions(offset_x, offset_y)
         self.draw_particles(offset_x, offset_y)
 
         if self.wave_banner > 0:
@@ -380,25 +526,45 @@ class ThunderFighter:
                                 font=("Microsoft YaHei UI", 12))
         self.canvas.create_text(WIDTH / 2, 480, text=self.t("射击   SPACE / J       暂停   P", "FIRE   SPACE / J       PAUSE   P"), fill="#89a8d4",
                                 font=("Microsoft YaHei UI", 12))
-        self.canvas.create_text(WIDTH / 2, 600, text=self.t("收集绿色能量核心，升级火力至三重射击", "Collect green cores to upgrade to triple-shot"), fill="#4d709f",
+        self.canvas.create_text(WIDTH / 2, 600, text=self.t("每级经验独立计算，满级后经验可兑换随机道具", "Each level has separate EXP; max power grants random items"), fill="#4d709f",
                                 font=("Microsoft YaHei UI", 10))
         self.canvas.create_text(WIDTH / 2, 670, text=self.t("按 L 切换语言", "Press L to switch language"), fill="#6b8fc0",
                                 font=("Microsoft YaHei UI", 10))
         self.canvas.create_text(WIDTH / 2, 718, text=self.t("ESC 退出", "ESC EXIT"), fill="#354b72", font=("Segoe UI", 9))
 
     def draw_hud(self):
-        self.canvas.create_rectangle(0, 0, WIDTH, 55, fill="#09152e", outline="#1d3860")
+        self.canvas.create_rectangle(0, 0, WIDTH, 60, fill="#09152e", outline="#1d3860")
         self.canvas.create_text(20, 18, anchor="w", text=self.t("分数", "SCORE"), fill="#587aa9", font=("Segoe UI", 8, "bold"))
         self.canvas.create_text(20, 38, anchor="w", text=f"{self.score:07d}", fill="#e6f8ff", font=("Segoe UI", 16, "bold"))
         self.canvas.create_text(WIDTH / 2, 18, text=f"{self.t('波次', 'WAVE')} {self.wave}", fill="#7c9bc9", font=("Segoe UI", 9, "bold"))
-        self.canvas.create_text(WIDTH / 2, 38, text=self.t("火力", "POWER") + " " + "◆" * self.player["power"] + "◇" * (3 - self.player["power"]),
+        self.canvas.create_text(WIDTH / 2, 38, text=self.t("火力", "POWER") + " " + "◆" * self.player["power"] + "◇" * (5 - self.player["power"]),
                                 fill="#67e9c0", font=("Segoe UI", 10, "bold"))
         self.canvas.create_text(WIDTH - 20, 18, anchor="e", text=self.t("护盾", "SHIELD"), fill="#587aa9", font=("Segoe UI", 8, "bold"))
-        self.canvas.create_text(WIDTH - 20, 38, anchor="e", text="♥ " * self.player["lives"], fill="#ff7895", font=("Segoe UI", 16, "bold"))
+        shield_text = "♥" * self.player["shield"] + "♡" * (self.player["max_shield"] - self.player["shield"])
+        self.canvas.create_text(WIDTH - 20, 38, anchor="e", text=shield_text, fill="#ff7895", font=("Segoe UI", 14, "bold"))
+        if self.player["power"] >= 5:
+            xp_label = f"EXP +{self.player['bonus_experience']}/{MAX_POWER_BONUS_XP}"
+            xp_ratio = min(1, self.player["bonus_experience"] / MAX_POWER_BONUS_XP)
+        else:
+            next_xp = XP_THRESHOLDS[self.player["power"] - 1]
+            xp_label = f"EXP {self.player['experience']}/{next_xp}"
+            xp_ratio = min(1, self.player["experience"] / next_xp)
+        self.canvas.create_text(20, 53, anchor="w", text=xp_label,
+                                fill="#7599c9", font=("Segoe UI", 7, "bold"))
+        self.canvas.create_rectangle(92, 50, 240, 55, fill="#172c4d", outline="")
+        self.canvas.create_rectangle(92, 50, 92 + 148 * xp_ratio, 55, fill="#61d8ff", outline="")
+        status = []
+        if self.player["mask_timer"] > 0:
+            status.append(f"MASK {math.ceil(self.player['mask_timer'])}s")
+        if self.player["rocket_timer"] > 0:
+            status.append(f"ROCKET {math.ceil(self.player['rocket_timer'])}s")
+        if status:
+            self.canvas.create_text(WIDTH - 20, 53, anchor="e", text="  ".join(status),
+                                    fill="#ffb76b", font=("Segoe UI", 7, "bold"))
         if self.boss:
-            self.canvas.create_rectangle(95, 64, WIDTH - 95, 70, fill="#19233e", outline="")
+            self.canvas.create_rectangle(95, 66, WIDTH - 95, 72, fill="#19233e", outline="")
             ratio = max(0, self.boss["hp"] / self.boss["max_hp"])
-            self.canvas.create_rectangle(95, 64, 95 + (WIDTH - 190) * ratio, 70, fill="#ff5477", outline="")
+            self.canvas.create_rectangle(95, 66, 95 + (WIDTH - 190) * ratio, 72, fill="#ff5477", outline="")
 
     def draw_player(self, x=None, y=None, preview=False):
         if x is None:
@@ -410,6 +576,17 @@ class ThunderFighter:
         self.canvas.create_polygon([x, y - 18, x - 7, y + 8, x, y + 3, x + 7, y + 8], fill="#efffff", outline="")
         self.canvas.create_polygon([x - 15, y + 19, x - 8, y + 12, x - 6, y + 28, x - 13, y + 24], fill="#ffb44d", outline="")
         self.canvas.create_polygon([x + 15, y + 19, x + 8, y + 12, x + 6, y + 28, x + 13, y + 24], fill="#ffb44d", outline="")
+
+    def draw_mask_aura(self, ox, oy):
+        timer = self.player["mask_timer"]
+        if timer <= 0:
+            return
+        if timer <= 3 and int(timer * 10) % 2 == 0:
+            return
+        x = self.player["x"] + ox
+        y = self.player["y"] + oy
+        self.canvas.create_oval(x - 31, y - 36, x + 31, y + 36,
+                                outline="#73eaff", width=2)
 
     def draw_enemy(self, e, ox, oy):
         x, y, s = e["x"] + ox, e["y"] + oy, e["size"]
@@ -436,8 +613,30 @@ class ThunderFighter:
     def draw_powerup(self, power, ox, oy):
         x, y = power["x"] + ox, power["y"] + oy
         r = 13 + math.sin(power["spin"]) * 2
-        self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="#0f735f", outline="#74ffd0", width=2)
-        self.canvas.create_text(x, y, text="+", fill="#eafff5", font=("Segoe UI", 15, "bold"))
+        if power["type"] == "mask":
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="#145777", outline="#73eaff", width=2)
+            self.canvas.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#d7fbff", width=2)
+            label, color = "M", "#eaffff"
+        elif power["type"] == "rocket":
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="#8b3f38", outline="#ffb36e", width=2)
+            self.canvas.create_polygon([x, y - 9, x - 6, y + 7, x, y + 4, x + 6, y + 7],
+                                       fill="#ff744e", outline="#fff0b3")
+            label, color = "R", "#fff0b3"
+        else:
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, fill="#0f735f", outline="#74ffd0", width=2)
+            label, color = "+", "#eafff5"
+        self.canvas.create_text(x, y, text=label, fill=color, font=("Segoe UI", 11, "bold"))
+
+    def draw_explosions(self, ox, oy):
+        for explosion in self.explosions:
+            ratio = max(0, explosion["life"] / explosion["max_life"])
+            radius = explosion["radius"] * (1 - ratio * 0.45)
+            x, y = explosion["x"] + ox, explosion["y"] + oy
+            self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
+                                    outline="#ffbd5e", width=max(1, int(4 * ratio)))
+            self.canvas.create_oval(x - radius * 0.45, y - radius * 0.45,
+                                    x + radius * 0.45, y + radius * 0.45,
+                                    outline="#fff0ad", width=max(1, int(3 * ratio)))
 
     def draw_particles(self, ox, oy):
         for part in self.particles:
