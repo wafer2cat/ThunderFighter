@@ -1,5 +1,7 @@
 # 雷霆战机 · Thunder Fighter
 
+[English](README.en.md)
+
 一个使用 Python 标准库 `tkinter` 制作的纵版射击小游戏，无需安装 pygame 或其他第三方依赖。
 
 ## 启动

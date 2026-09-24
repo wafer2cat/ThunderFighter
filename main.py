@@ -4,6 +4,7 @@ import time
 import tkinter as tk
 
 
+# 游戏画布尺寸，以及 Tkinter 定时调用主循环的间隔（约 60 FPS）。
 WIDTH, HEIGHT = 480, 760
 FPS_MS = 16
 XP_THRESHOLDS = [100, 250, 450, 700]
@@ -16,6 +17,8 @@ MAX_POWER_BONUS_XP = 250
 
 
 class ThunderFighter:
+    """管理游戏状态、输入、更新逻辑和 Tkinter 绘制。"""
+
     def __init__(self, root):
         self.root = root
         self.language = "zh"
@@ -27,6 +30,7 @@ class ThunderFighter:
         )
         self.canvas.pack()
 
+        # 用集合记录当前按下的按键，便于在每一帧持续检测移动和射击输入。
         self.keys = set()
         self.state = "menu"
         self.paused = False
@@ -37,6 +41,7 @@ class ThunderFighter:
         self.root.bind("<KeyRelease>", self.on_key_up)
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
+        # 星星只在初始化时生成一次，之后每帧更新位置，形成滚动星空背景。
         self.stars = []
         for _ in range(90):
             self.stars.append({
@@ -58,6 +63,7 @@ class ThunderFighter:
         self.root.title(self.t("雷霆战机 · Thunder Fighter", "Thunder Fighter · 雷霆战机"))
 
     def reset_game(self):
+        # 重新开始时重置所有实体和计时器，但保留历史最高分。
         self.player = {
             "x": WIDTH / 2, "y": HEIGHT - 90, "speed": 310,
             "shield": 5, "max_shield": 5, "cooldown": 0,
@@ -85,6 +91,7 @@ class ThunderFighter:
     def on_key_down(self, event):
         key = event.keysym.lower()
         self.keys.add(key)
+        # 菜单和结算界面共用同一组开始/重开快捷键。
         if key in ("return", "space") and self.state in ("menu", "gameover"):
             self.reset_game()
             self.state = "playing"
@@ -100,16 +107,19 @@ class ThunderFighter:
         self.keys.discard(event.keysym.lower())
 
     def loop(self):
+        # 使用实际经过的时间计算 dt，使游戏速度不依赖机器性能。
         now = time.perf_counter()
         dt = min(now - self.last_time, 0.05)
         self.last_time = now
         self.update_background(dt)
+        # 暂停时停止游戏逻辑，但仍继续绘制界面和背景效果。
         if self.state == "playing" and not self.paused:
             self.update(dt)
         self.draw()
         self.root.after(FPS_MS, self.loop)
 
     def update_background(self, dt):
+        # 背景星星在游戏中移动得更快，菜单和结算界面则保持较慢速度。
         for star in self.stars:
             star["y"] += star["speed"] * dt * (1.5 if self.state == "playing" else 0.45)
             if star["y"] > HEIGHT + 3:
@@ -120,6 +130,7 @@ class ThunderFighter:
 
     def update(self, dt):
         p = self.player
+        # 更新射击冷却、临时火力和受伤后的无敌时间。
         if p["cooldown"] > 0:
             p["cooldown"] -= dt
         if p["mask_timer"] > 0:
@@ -131,6 +142,7 @@ class ThunderFighter:
         if p["invincible"] > 0:
             p["invincible"] -= dt
 
+        # 将按键转换为方向向量，并归一化，避免斜向移动速度更快。
         dx = (1 if "right" in self.keys or "d" in self.keys else 0) - \
              (1 if "left" in self.keys or "a" in self.keys else 0)
         dy = (1 if "down" in self.keys or "s" in self.keys else 0) - \
@@ -139,10 +151,12 @@ class ThunderFighter:
         p["x"] = max(24, min(WIDTH - 24, p["x"] + dx / length * p["speed"] * dt))
         p["y"] = max(70, min(HEIGHT - 28, p["y"] + dy / length * p["speed"] * dt))
 
+        # 按住射击键时根据当前冷却时间自动连射。
         if ("space" in self.keys or "j" in self.keys) and p["cooldown"] <= 0:
             self.shoot()
             p["cooldown"] = 0.16 if p["power"] <= 3 else 0.11
 
+        # 每 25 秒推进一波；每 5 的倍数波次会生成 Boss。
         self.wave_timer += dt
         if self.wave_timer > 25 and self.boss is None:
             self.wave_timer = 0
@@ -160,6 +174,7 @@ class ThunderFighter:
         else:
             self.update_boss(dt)
 
+        # 遍历切片副本，允许在遍历过程中安全删除已经离场的对象。
         for bullet in self.bullets[:]:
             bullet["y"] -= bullet["speed"] * dt
             bullet["life"] -= dt
@@ -201,6 +216,7 @@ class ThunderFighter:
 
     def shoot(self):
         p = self.player
+        # 火力等级决定子弹数量和横向间距，最高可升级到五重射击。
         offsets_by_power = {
             1: [0],
             2: [-11, 11],
@@ -220,6 +236,7 @@ class ThunderFighter:
         self.add_particles(p["x"], p["y"] - 27, "#8ff8ff", 2, 0.2)
 
     def spawn_enemy(self):
+        # 不同敌机拥有不同的体型、生命值和出现概率。
         kind = random.choices(["scout", "tank", "zigzag"], weights=[6, 2, 3])[0]
         size = {"scout": 16, "tank": 23, "zigzag": 18}[kind]
         hp = {"scout": 1, "tank": 4, "zigzag": 2}[kind] + self.wave // 6
@@ -232,6 +249,7 @@ class ThunderFighter:
         })
 
     def spawn_boss(self):
+        # Boss 出现时清空普通敌机，避免画面中同时堆积过多目标。
         self.boss = {"x": WIDTH / 2, "y": -100, "hp": 100 + self.wave * 14,
                      "max_hp": 100 + self.wave * 14, "phase": 0, "entering": True}
         self.enemies.clear()
@@ -240,6 +258,7 @@ class ThunderFighter:
     def update_boss(self, dt):
         b = self.boss
         b["phase"] += dt
+        # Boss 先从屏幕上方进入，停稳后左右摆动并进行扇形射击。
         if b["entering"]:
             b["y"] += 80 * dt
             if b["y"] >= 115:
@@ -256,6 +275,7 @@ class ThunderFighter:
                                                "vy": math.cos(angle) * 180 + 95})
 
     def enemy_shoot(self, enemy):
+        # 普通敌机的子弹会朝玩家当前位置飞行。
         dx = self.player["x"] - enemy["x"]
         dy = self.player["y"] - enemy["y"]
         distance = math.hypot(dx, dy) or 1
@@ -264,6 +284,7 @@ class ThunderFighter:
 
     def check_collisions(self):
         p = self.player
+        # 先处理玩家子弹与 Boss、普通敌机的碰撞。
         for bullet in self.bullets[:]:
             target_hit = False
             if self.boss and abs(bullet["x"] - self.boss["x"]) < 55 and abs(bullet["y"] - self.boss["y"]) < 42:
@@ -329,6 +350,7 @@ class ThunderFighter:
                 if self.boss["hp"] <= 0:
                     self.defeat_boss()
 
+        # 无敌期间跳过玩家受伤判定，但仍允许收集能量核心。
         if p["invincible"] <= 0:
             player_hit_this_frame = False
             for enemy in self.enemies[:]:
@@ -344,6 +366,7 @@ class ThunderFighter:
                         self.hit_player()
                         player_hit_this_frame = True
 
+        # 能量核心最多将火力提升到三重射击，并持续一段时间。
         for power in self.powerups[:]:
             if abs(p["x"] - power["x"]) < 24 and abs(p["y"] - power["y"]) < 25:
                 self.apply_powerup(power["type"])
@@ -420,6 +443,7 @@ class ThunderFighter:
                 self.explosions.remove(explosion)
 
     def hit_player(self):
+        # 面具可抵挡一次伤害；否则消耗护盾，并在护盾耗尽后结束游戏。
         if self.player["mask_timer"] > 0:
             self.player["mask_timer"] = 0
             self.add_particles(self.player["x"], self.player["y"], "#73eaff", 18, 0.55)
@@ -434,6 +458,7 @@ class ThunderFighter:
             self.state = "gameover"
 
     def add_particles(self, x, y, color, count, life):
+        # 以随机方向和速度生成粒子，用于爆炸、命中和拾取反馈。
         for _ in range(count):
             angle = random.random() * math.tau
             speed = random.uniform(35, 170)
@@ -442,6 +467,7 @@ class ThunderFighter:
                                    "max_life": life, "size": random.uniform(1.5, 4), "color": color})
 
     def update_particles(self, dt):
+        # 粒子逐渐减速并淡出，生命周期结束后从列表移除。
         for particle in self.particles[:]:
             particle["x"] += particle["vx"] * dt
             particle["y"] += particle["vy"] * dt
@@ -452,6 +478,7 @@ class ThunderFighter:
                 self.particles.remove(particle)
 
     def draw(self):
+        # 每帧重绘整个画布，统一叠加屏幕震动偏移和受伤闪屏效果。
         self.canvas.delete("all")
         offset_x = random.uniform(-self.shake * 5, self.shake * 5)
         offset_y = random.uniform(-self.shake * 5, self.shake * 5)
@@ -462,6 +489,7 @@ class ThunderFighter:
             self.draw_menu()
             return
 
+        # 绘制顺序决定遮挡关系：HUD、道具、子弹、敌人、玩家、粒子和提示层。
         self.draw_hud()
         for power in self.powerups:
             self.draw_powerup(power, offset_x, offset_y)
